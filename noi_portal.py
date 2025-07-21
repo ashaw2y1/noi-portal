@@ -1,53 +1,40 @@
 import streamlit as st
 import pandas as pd
-import psycopg2
+from datetime import date
 import os
-from datetime import datetime, date
 
-# --------------- CONFIG ---------------
+# Set up page
 st.set_page_config(page_title="NOI Portal", layout="centered")
-
-# --------------- DATABASE CONNECTION ---------------
-
-def get_connection():
-    return psycopg2.connect(st.secrets["database"]["url"])
-
-# --------------- USER AUTHENTICATION ---------------
-st.sidebar.header("🔐 Login")
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    email = st.sidebar.text_input("Email")
-    password = st.sidebar.text_input("Password", type="password")
-    login_button = st.sidebar.button("Login")
-
-    # Example user credentials (Replace with database check later)
-    valid_users = {
-        "user1@example.com": "pass123",
-        "admin@sg.com": "admin456"
-    }
-
-    if login_button:
-        if email in valid_users and password == valid_users[email]:
-            st.session_state.authenticated = True
-            st.session_state.user_email = email
-            st.success("✅ Login successful!")
-        else:
-            st.error("❌ Invalid credentials")
-    st.stop()
-
-# --------------- FORM ----------------
 st.title("🧾 NOI Entry Portal")
+
+# CSV file path
+file_path = "NOI_log.csv"
+
+# Get the next Credit Note Number
+def get_next_credit_note_number():
+    if os.path.exists(file_path):
+        df = pd.read_csv(file_path)
+        last_number = df.shape[0]
+    else:
+        last_number = 0
+    return f"CN-{last_number + 1:03d}"
+
+# Generate credit note number
+credit_note_no = get_next_credit_note_number()
 
 with st.form("credit_note_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
     with col1:
-        credit_date = st.date_input("Receiving Date", value=date.today())
+        st.text_input("Document Serial Number", value=credit_note_no, disabled=True)
     with col2:
-        supplier_code = st.text_input("Supplier Code", placeholder="SUP-001")
+        credit_date = st.date_input("Receiving Date", value=date.today())
 
-    supplier_name = st.text_input("Supplier Name")
+    col3, col4 = st.columns([1, 2])
+    with col3:
+        supplier_code = st.text_input("Supplier Code", placeholder="SUP-001")
+    with col4:
+        supplier_name = st.text_input("Supplier Name")
+
     invoice_ref = st.text_input("Invoice Reference")
     amount = st.number_input("Value", min_value=0.0, format="%.2f")
 
@@ -62,14 +49,15 @@ with st.form("credit_note_form", clear_on_submit=True):
         ]
     )
 
-    comment = st.text_area("Comments (optional)", height=100)
+    reason = st.text_area("Comments", height=100)
+
     uploaded_file = st.file_uploader(
         "📎 Upload Invoice File (PDF or Image)", type=["pdf", "jpg", "jpeg", "png"]
     )
 
     submitted = st.form_submit_button("✅ Submit")
 
-# --------------- HANDLE SUBMISSION ---------------
+# Validation and handle submission
 if submitted:
     errors = []
 
@@ -82,57 +70,50 @@ if submitted:
     if amount <= 0:
         errors.append("❌ Value must be greater than 0.")
     if not uploaded_file:
-        errors.append("❌ Please upload the invoice file.")
+        errors.append("❌ Please upload the invoice file (PDF or Image).")
 
     if errors:
         for error in errors:
             st.error(error)
-        st.warning("⚠️ Please fix the above errors.")
+        st.warning("⚠️ Please fill in all required fields before submitting.")
     else:
-        # Generate filename for upload
-        ext = os.path.splitext(uploaded_file.name)[1]
-        invoice_file_name = f"temp{ext}"  # temp, will rename after insert
+        # All fields are valid — proceed
+        invoice_file_name = "None"
+        if uploaded_file:
+            ext = os.path.splitext(uploaded_file.name)[1]
+            invoice_file_name = f"{credit_note_no}{ext}"
 
-        # Connect and insert into Supabase PostgreSQL
-        try:
-            conn = get_connection()
-            cur = conn.cursor()
+        new_entry = {
+            "Serial No": credit_note_no,
+            "Date": credit_date.strftime('%Y-%m-%d'),
+            "Supplier Code": supplier_code,
+            "Supplier Name": supplier_name,
+            "Invoice Reference": invoice_ref,
+            "Amount": amount,
+            "Type": credit_note_type,
+            "Comment": reason,
+            "Invoice File": invoice_file_name
+        }
 
-            cur.execute("""
-                INSERT INTO noi_entries (
-                    submitted_by, submitted_at, date,
-                    supplier_code, supplier_name, invoice_ref,
-                    amount, type, comment, invoice_file_name
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                st.session_state.user_email,
-                datetime.now(),
-                credit_date,
-                supplier_code,
-                supplier_name,
-                invoice_ref,
-                amount,
-                credit_note_type,
-                comment,
-                invoice_file_name
-            ))
+        if os.path.exists(file_path):
+            df = pd.read_csv(file_path)
+            df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+        else:
+            df = pd.DataFrame([new_entry])
 
-            record_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
-            conn.close()
+        df.to_csv(file_path, index=False)
 
-            # Save file with proper name
-            final_filename = f"NOI-{record_id}{ext}"
+        # Save uploaded file with serial name
+        if uploaded_file:
             upload_dir = "invoices"
             os.makedirs(upload_dir, exist_ok=True)
-            with open(os.path.join(upload_dir, final_filename), "wb") as f:
+            with open(os.path.join(upload_dir, invoice_file_name), "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            st.success(f"✅ Submission successful! Document ID: {record_id}")
-            st.info(f"📎 File saved as: `{final_filename}`")
+        st.success(f"✅ Document `{credit_note_no}` submitted successfully!")
 
-        except Exception as e:
-            st.error(f"❌ Failed to submit: {e}")
+# Display previous entries
+if os.path.exists(file_path):
+    with st.expander("📄 View Submitted Credit Notes"):
+        submitted_df = pd.read_csv(file_path)
+        st.dataframe(submitted_df.tail(10), use_container_width=True)
